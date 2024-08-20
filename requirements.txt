@@ -1,0 +1,17 @@
+langchain==0.2.5
+langchain_aws==0.1.7
+langchain_community==0.2.5
+streamlit==1.36.0
+opensearch-py==2.6.0
+pypdf==4.2.0
+faiss-cpu==1.7.4
+pdfplumber==0.10.3
+termcolor==2.4.0
+opensearch_dsl==2.1.0
+transformers
+Pillow
+botocore
+boto3
+awscli
+jq
+anthropic
