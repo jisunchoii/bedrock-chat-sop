@@ -29,8 +29,6 @@ class parameter_store():
             Names=[key,],
             WithDecryption=WithDecryption
         )
-        print(response, '----')
-        print(response['Parameters'][0]['Value'], 'ansever')
         return response['Parameters'][0]['Value']
 
     def get_all_params(self, ):
