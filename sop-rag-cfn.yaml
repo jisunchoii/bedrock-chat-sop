@@ -1,0 +1,789 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  # OpenSearch 관련 매개변수
+  DEV:
+    Type: String
+    Description: "True for single-AZ deployment, False for multi-AZ with standby."
+    Default: "True"
+    AllowedValues: ["True", "False"]
+  VERSION:
+    Type: String
+    Description: "OpenSearch Version"
+    Default: "2.13"
+  OpenSearchInstanceType:
+    Type: String
+    Description: "The instance type for OpenSearch nodes"
+    Default: "r6g.xlarge.search"
+    AllowedValues: 
+      - "r6g.large.search"
+      - "r6g.xlarge.search"
+      - "r6g.2xlarge.search"
+      - "r6g.4xlarge.search"
+      - "r6g.8xlarge.search"
+      - "r6g.12xlarge.search"
+      - "r6g.16xlarge.search"
+  OpenSearchUserID:
+    Type: String
+    Description: "The ID for the OpenSearch Service"
+    Default: "raguser"
+  OpenSearchUserPassword:
+    Type: String
+    Description: "The password for the OpenSearch Service"
+    NoEcho: true
+    Default: "MarsEarth1!"
+  VolumeSize:
+    Type: Number
+    Description: "The size of the EBS volume"
+    Default: 100
+  OpenSearchIndexName:
+    Type: String
+    Description: "The name of the OpenSearch index"
+    Default: "sop-genai-demo"
+
+  # Web App 관련 매개변수
+  VPCName:
+    Type: String
+    Default: "MyVPC"
+    Description: "The name of the VPC"
+  VPCCIDR:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: "The CIDR block for the VPC"
+  PublicSubnetCIDR1:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: "The CIDR block for the first public subnet"
+  PublicSubnetCIDR2:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: "The CIDR block for the second public subnet"
+  PrivateSubnetCIDR1:
+    Type: String
+    Default: "10.0.3.0/24"
+    Description: "The CIDR block for the first private subnet"
+  PrivateSubnetCIDR2:
+    Type: String
+    Default: "10.0.4.0/24"
+    Description: "The CIDR block for the second private subnet"
+  InstanceType:
+    Type: String
+    Default: "m6i.xlarge"
+    Description: "EC2 instance type"
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - m6i.large
+      - m6i.xlarge
+      - m6i.2xlarge
+      - m6i.4xlarge
+    ConstraintDescription: "Must be a valid EC2 instance type."
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "Name of an existing EC2 KeyPair to enable SSH access"
+  AMI:
+    Type: AWS::EC2::Image::Id
+    Default: "ami-066784287e358dad1"  # Amazon Linux 2023 AMI ID for us-east-1
+    Description: "AMI ID for the EC2 instance"
+
+Conditions:
+  IsDev: !Equals [!Ref DEV, "True"]
+
+Resources:
+  # OpenSearch 리소스 정의
+  OpenSearchDomain:
+    Type: "AWS::OpenSearchService::Domain"
+    Properties: 
+      DomainName: !Sub "rag-hol-${AWS::AccountId}"
+      EngineVersion: !Sub "OpenSearch_${VERSION}"
+      ClusterConfig: 
+        InstanceType: !Ref OpenSearchInstanceType
+        InstanceCount: !If
+          - IsDev
+          - 1
+          - 3
+        ZoneAwarenessEnabled: !If
+          - IsDev
+          - false
+          - true
+        DedicatedMasterEnabled: !If
+          - IsDev
+          - false
+          - true
+        MultiAZWithStandbyEnabled: !If
+          - IsDev
+          - false
+          - true
+        DedicatedMasterType: !If
+          - IsDev
+          - !Ref "AWS::NoValue"
+          - "r6g.large.search"
+        DedicatedMasterCount: !If
+          - IsDev
+          - !Ref "AWS::NoValue"
+          - 3
+      EBSOptions: 
+        EBSEnabled: true
+        VolumeType: "gp3"
+        VolumeSize: !Ref VolumeSize
+      NodeToNodeEncryptionOptions: 
+        Enabled: true
+      EncryptionAtRestOptions: 
+        Enabled: true
+      DomainEndpointOptions: 
+        EnforceHTTPS: true
+      AdvancedSecurityOptions:
+        Enabled: true
+        InternalUserDatabaseEnabled: true
+        MasterUserOptions:
+          MasterUserName: !Ref OpenSearchUserID
+          MasterUserPassword: !Ref OpenSearchUserPassword
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal: "*"
+            Action: "es:*"
+            Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/rag-hol-${AWS::AccountId}/*"
+
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: "Allow"
+            Principal: 
+              Service: "lambda.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - "arn:aws:iam::aws:policy/AmazonOpenSearchServiceFullAccess"
+      Policies:
+        - PolicyName: "CustomOpensearchPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "es:AssociatePackage"
+                  - "es:ListPackagesForDomain"
+                  - "states:StartExecution"
+                Resource: "*"
+
+  # Parameter Store에 OpenSearch 정보 저장
+  OpenSearchDomainEndpointParam:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "opensearch_domain_endpoint"
+      Type: "String"
+      Value: !GetAtt OpenSearchDomain.DomainEndpoint
+      Tier: "Standard"
+
+  OpenSearchUserIDParam:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "opensearch_userid"
+      Type: "String"
+      Value: !Ref OpenSearchUserID
+      Tier: "Standard"
+
+  OpenSearchUserPasswordParam:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "opensearch_password"
+      Type: "String"
+      Value: !Ref OpenSearchUserPassword
+      Tier: "Standard"
+
+  OpenSearchIndexNameParam:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "opensearch_index_name"
+      Type: "String"
+      Value: !Ref OpenSearchIndexName
+      Tier: "Standard"
+  
+  StepFunctionsExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "states.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "StepFunctionsExecutionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: "*"
+
+  OpenSearchStateMachine:
+    Type: "AWS::StepFunctions::StateMachine"
+    Properties:
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      DefinitionString: !Sub
+        - |
+          {
+            "Comment": "OpenSearch Domain Creation and Nori Plugin Association",
+            "StartAt": "Wait For Domain Creation",
+            "States": {
+              "Wait For Domain Creation": {
+                "Type": "Wait",
+                "Seconds": 60,
+                "Next": "Check Domain Status"
+              },
+              "Check Domain Status": {
+                "Type": "Task",
+                "Resource": "${CheckDomainStatusFunction}",
+                "Next": "Is Domain Active?"
+              },
+              "Is Domain Active?": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.status",
+                    "StringEquals": "ACTIVE",
+                    "Next": "Associate Nori Plugin"
+                  }
+                ],
+                "Default": "Wait For Domain Creation"
+              },
+              "Associate Nori Plugin": {
+                "Type": "Task",
+                "Resource": "${AssociateNoriPluginFunction}",
+                "End": true
+              }
+            }
+          }
+        - {
+            CheckDomainStatusFunction: !GetAtt CheckDomainStatusFunction.Arn,
+            AssociateNoriPluginFunction: !GetAtt AssociateNoriPluginFunction.Arn
+          }
+
+  CheckDomainStatusFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.handler"
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: "python3.8"
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def handler(event, context):
+              domain_name = os.environ['OPENSEARCH_DOMAIN']
+              client = boto3.client('opensearch')
+              response = client.describe_domain(DomainName=domain_name)
+              status = response['DomainStatus']['Processing']
+              return {"status": "ACTIVE" if not status else "PROCESSING"}
+
+      Environment:
+        Variables:
+          OPENSEARCH_DOMAIN: !Sub "rag-hol-${AWS::AccountId}"
+
+  AssociateNoriPluginFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.handler"
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: "python3.8"
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import os
+          import time
+          import boto3
+          from botocore.exceptions import ClientError
+
+          nori_pkg_id = {
+              'us-east-1': {
+                  '2.3': 'G196105221',
+                  '2.5': 'G240285063',
+                  '2.7': 'G16029449',
+                  '2.9': 'G60209291',
+                  '2.11': 'G181660338',
+                  '2.13': 'G225840180'
+              },
+              'us-west-2': {
+                  '2.3': 'G94047474',
+                  '2.5': 'G138227316',
+                  '2.7': 'G182407158',
+                  '2.9': 'G226587000',
+                  '2.11': 'G79602591',
+                  '2.13': 'G123782433'
+              }
+          }
+
+          def associate_package_with_retry(opensearch, package_id, domain_name, max_attempts=5):
+              for attempt in range(max_attempts):
+                  try:
+                      opensearch.associate_package(
+                          PackageID=package_id,
+                          DomainName=domain_name
+                      )
+                      print(f"Successfully associated package {package_id} with domain {domain_name}")
+                      return True
+                  except ClientError as e:
+                      print(f"Error associating package (attempt {attempt + 1}/{max_attempts}): {e}")
+                      if attempt < max_attempts - 1:
+                          time.sleep(30)
+              return False
+
+          def handler(event, context):
+              domain_name = os.environ['OPENSEARCH_DOMAIN']
+              version = os.environ['VERSION'].replace('OpenSearch_', '')
+              region = os.environ['REGION']
+
+              print(f"Starting Nori plugin installation for domain: {domain_name}, version: {version}, region: {region}")
+
+              package_id = nori_pkg_id.get(region, {}).get(version)
+              if not package_id:
+                  raise ValueError(f"No package ID found for region {region} and version {version}")
+
+              opensearch = boto3.client('opensearch', region_name=region)
+
+              if not associate_package_with_retry(opensearch, package_id, domain_name):
+                  raise Exception(f"Failed to associate package {package_id} with domain {domain_name}")
+
+              print("Nori plugin installation completed successfully")
+              return {
+                  'statusCode': 200,
+                  'body': 'Nori plugin installation completed successfully'
+              }
+
+      Environment:
+        Variables:
+          OPENSEARCH_DOMAIN: !Sub "rag-hol-${AWS::AccountId}"
+          VERSION: !Ref VERSION
+          REGION: !Ref "AWS::Region"
+
+  StartStepFunctionsExecution:
+    Type: "Custom::StartStepFunctionsExecution"
+    DependsOn: OpenSearchDomain
+    Properties:
+      ServiceToken: !GetAtt StartStepFunctionsExecutionFunction.Arn
+      StateMachineArn: !Ref OpenSearchStateMachine
+
+  StartStepFunctionsExecutionFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.handler"
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: "python3.8"
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+            if event['RequestType'] in ['Create', 'Update']:
+              client = boto3.client('stepfunctions')
+              try:
+                response = client.start_execution(
+                  stateMachineArn=event['ResourceProperties']['StateMachineArn']
+                )
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {'ExecutionArn': response['executionArn']})
+              except Exception as e:
+                cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+            else:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+
+  # Web App 리소스 정의
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !Ref VPCCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref VPCName
+
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref VPCName
+
+  AttachGateway:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCIDR1
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "PublicSubnet1"
+
+  PublicSubnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCIDR2
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "PublicSubnet2"
+
+  PrivateSubnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCIDR1
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: "PrivateSubnet1"
+
+  PrivateSubnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCIDR2
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: "PrivateSubnet2"
+
+  RouteTablePublic:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: "PublicRouteTable"
+
+  RouteTablePrivate1:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: "PrivateRouteTable1"
+
+  RouteTablePrivate2:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: "PrivateRouteTable2"
+
+  RoutePublic:
+    Type: "AWS::EC2::Route"
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  NatGateway:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+
+  NatGatewayEIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: "vpc"
+      Tags:
+        - Key: Name
+          Value: "NatGatewayEIP"
+
+  RoutePrivate1:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate1
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway
+
+  RoutePrivate2:
+    Type: "AWS::EC2::Route"
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate2
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway
+
+  SubnetRouteTableAssociationPublic1:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTablePublic
+
+  SubnetRouteTableAssociationPublic2:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTablePublic
+
+  SubnetRouteTableAssociationPrivate1:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref RouteTablePrivate1
+
+  SubnetRouteTableAssociationPrivate2:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref RouteTablePrivate2
+
+  ALBSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Allow traffic from CloudFront"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: pl-3b927c52  # Global CloudFront managed prefix list for HTTP/S traffic
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: "ALBSecurityGroup"
+
+  EC2InstanceSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Allow traffic from ALB"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: "EC2SecurityGroup"
+
+  # SSM Role with unique RoleName
+  SSMInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Path: "/"
+      RoleName: !Sub "EC2SSMInstanceRole-${AWS::StackName}-${AWS::Region}"
+
+  # Instance Profile for EC2
+  InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref SSMInstanceRole
+
+  EC2Instance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !Ref EC2InstanceSecurityGroup
+      SubnetId: !Ref PrivateSubnet1  # or !Ref PrivateSubnet2 depending on your preference
+      ImageId: !Ref AMI
+      IamInstanceProfile: !Ref InstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          
+          # Update the instance and install required dependencies
+          yum update -y
+          yum install -y git
+
+          python3 -m ensurepip
+          python3 -m pip install --upgrade pip
+
+          # Clone the GitHub repository as ec2-user
+          sudo -u ec2-user git clone https://github.com/jisunchoii/bedrock-chat-sop.git /home/ec2-user/bedrock-chat-sop
+
+          # Set the AWS region
+          sudo -u ec2-user aws configure set default.region us-east-1
+
+          # Navigate to the app directory and run Streamlit on port 8080 as ec2-user
+          cd /home/ec2-user/bedrock-chat-sop
+          sudo -u ec2-user python3 -m pip install -r requirements.txt
+          sudo -u ec2-user python3 -m streamlit run app.py --server.port 8080 --server.enableCORS false --server.enableXsrfProtection false
+
+      Tags:
+        - Key: Name
+          Value: "MyEC2Instance"
+
+  LoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: "StreamlitALB"
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+
+  TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: "StreamlitTG"
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8080"
+      HealthCheckPath: "/"
+      Matcher:
+        HttpCode: "200"
+      Targets:
+        - Id: !Ref EC2Instance
+
+  Listener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  CloudFrontDistribution:
+    Type: "AWS::CloudFront::Distribution"
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Origins:
+          - Id: "ALBOrigin"
+            DomainName: !GetAtt LoadBalancer.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: "ALBOrigin"
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: ["GET", "HEAD"]
+          CachedMethods: ["GET", "HEAD"]
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  S3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub "my-bucket-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  S3BucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AllowSSLRequestsOnly"
+            Effect: "Deny"
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "${S3Bucket.Arn}/*"
+              - !GetAtt S3Bucket.Arn
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+
+Outputs:
+  VPCId:
+    Description: "VPC ID"
+    Value: !Ref VPC
+
+  PublicSubnetId1:
+    Description: "Public Subnet 1 ID"
+    Value: !Ref PublicSubnet1
+
+  PublicSubnetId2:
+    Description: "Public Subnet 2 ID"
+    Value: !Ref PublicSubnet2
+
+  PrivateSubnetId1:
+    Description: "Private Subnet 1 ID"
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnetId2:
+    Description: "Private Subnet 2 ID"
+    Value: !Ref PrivateSubnet2
+
+  EC2InstanceId:
+    Description: "EC2 Instance ID"
+    Value: !Ref EC2Instance
+
+  CloudFrontURL:
+    Description: "The URL of the CloudFront distribution"
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+
+  OpenSearchDomainEndpoint:
+    Description: "The endpoint of the OpenSearch domain"
+    Value: !GetAtt OpenSearchDomain.DomainEndpoint
+
+  OpenSearchDashboardsURL:
+    Description: "The URL for OpenSearch Dashboards"
+    Value: !Join ["", ["https://", !GetAtt OpenSearchDomain.DomainEndpoint, "/_dashboards/"]]
+
+  S3BucketName:
+    Description: "The name of the S3 bucket"
+    Value: !Ref S3Bucket
+
+  S3BucketArn:
+    Description: "The ARN of the S3 bucket"
+    Value: !GetAtt S3Bucket.Arn
