@@ -24,3 +24,14 @@ docker tag my-lambda-image:latest <account-id>.dkr.ecr.<your-region>.amazonaws.c
 # Docker 이미지 ECR에 푸시
 docker push <account-id>.dkr.ecr.<your-region>.amazonaws.com/my-lambda-repo:latest
 ```
+
+#### Lambda 함수 환경 변수
+index_name : sop-genai-demo
+opensearch_account : opensearch id
+opensearch_passwd : opensearch password
+opensearch_url : opensearch domain url 
+
+### Lambda 함수 권한
+- AmazonBedrockFullAccess
+- AmazonOpenSearchServiceFullAccess
+- AmazonS3FullAccess
