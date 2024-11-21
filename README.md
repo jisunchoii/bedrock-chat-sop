@@ -110,3 +110,8 @@ The request data flow through the application follows these steps:
 ```
 
 Note: The document processing flow involves separate Lambda functions that index documents into OpenSearch, which are then used by the main application flow.
+
+
+## Contact
+Jisun Choi (jschoii@amazon.com)
+KyungShik Shin (kyungss@amazon.com)
